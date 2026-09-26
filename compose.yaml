@@ -1,0 +1,12 @@
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: exp
+      POSTGRES_PASSWORD: exp
+      POSTGRES_DB: exp
+    ports:
+      # ローカルの Postgres が 5432 を使っているなら "5433:5432" にして、app.py の DSN も合わせる
+      - "5432:5432"
+    # 発展実験(④DB自体の上限)で触る。デフォルトは max_connections=100
+    # command: postgres -c max_connections=100

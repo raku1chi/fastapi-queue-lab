@@ -1,0 +1,8 @@
+# 素の uvicorn（asyncio + h11）で測る。uvicorn[standard] にすると uvloop / httptools に替わり、①②の挙動が変わる
+fastapi==0.141.1
+uvicorn==0.54.0
+# [asyncio] を付けないと、Apple Silicon の Mac では greenlet が入らず、/async が起動時にエラーになる
+sqlalchemy[asyncio]==2.1.1
+psycopg[binary]==3.3.6
+# plot.py 用
+matplotlib==3.11.2
