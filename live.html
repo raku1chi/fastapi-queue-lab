@@ -1,0 +1,357 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ライブ観測 · fastapi-queue-lab</title>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/uplot@1.6.32/dist/uPlot.min.css">
+<style>
+  :root {
+    color-scheme: light;
+    --page: #f9f9f7;
+    --surface: #fcfcfb;
+    --ink: #0b0b0b;
+    --ink2: #52514e;
+    --muted: #898781;
+    --grid: #e1e0d9;
+    --axis: #c3c2b7;
+    --shade: #f0efec;
+    --border: rgba(11, 11, 11, 0.10);
+    --s1: #2a78d6;
+    --s2: #eb6834;
+    --good: #0ca30c;
+    --critical: #d03b3b;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      color-scheme: dark;
+      --page: #0d0d0d;
+      --surface: #1a1a19;
+      --ink: #ffffff;
+      --ink2: #c3c2b7;
+      --muted: #898781;
+      --grid: #2c2c2a;
+      --axis: #383835;
+      --shade: #2c2c2a;
+      --border: rgba(255, 255, 255, 0.10);
+      --s1: #3987e5;
+      --s2: #d95926;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--page);
+    color: var(--ink);
+    font: 13px/1.5 system-ui, -apple-system, "Hiragino Sans", "Segoe UI", sans-serif;
+  }
+  body > header { padding: 16px 20px 12px; }
+  h1 { font-size: 15px; font-weight: 600; margin: 0 0 4px; }
+  #status { display: flex; flex-wrap: wrap; gap: 4px 20px; color: var(--ink2); }
+  .badge { display: inline-flex; align-items: center; gap: 6px; }
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); flex: none; }
+  .badge.ok .dot { background: var(--good); }
+  .badge.bad .dot { background: var(--critical); }
+  .badge.bad { color: var(--ink); font-weight: 600; }
+  main { display: grid; gap: 12px; padding: 0 20px 24px; }
+  .panel {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 10px 12px 6px;
+    min-width: 0;
+  }
+  .head { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 2px 16px; }
+  .head h2 { font-size: 13px; font-weight: 600; margin: 0; }
+  .readout { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 14px; color: var(--ink2); }
+  .readout .when { color: var(--muted); }
+  .item { display: inline-flex; align-items: baseline; gap: 6px; }
+  .key { width: 14px; height: 2px; border-radius: 1px; align-self: center; }
+  .item b { color: var(--ink); font-size: 16px; font-weight: 600; }
+  .chart { margin-top: 2px; }
+  .uplot { font-family: inherit; }
+  .u-cursor-x { border-right: 1px solid var(--muted) !important; }  /* 縦の細い実線で時刻を合わせる */
+  #note { color: var(--muted); padding: 0 20px 20px; }
+  #note code { font-size: 12px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>ライブ観測</h1>
+  <div id="status">
+    <span class="badge" id="probe"><span class="dot"></span><span class="text">probe につないでいます…</span></span>
+    <span class="badge" id="stats"><span class="dot"></span><span class="text">/stats: -</span></span>
+    <span id="elapsed"></span>
+  </div>
+</header>
+<main id="panels"></main>
+<p id="note">網かけは /stats が返らなかった区間。縦線は bench.py が記録した出来事（hey の開始・終了）。グラフにポインタを置くと、その時点の値が各パネルの右上に出る。</p>
+<script src="https://cdn.jsdelivr.net/npm/uplot@1.6.32/dist/uPlot.iife.min.js"></script>
+<script>
+"use strict";
+
+// 各パネルに出す値。limit はその値の上限（分かるときだけ水平線を引く）
+const PANELS = [
+  { title: "① accept queue の長さ", series: [["qlen", "qlen"]], limit: () => lastValue("qmax") },
+  { title: "② ループ上のタスク数", series: [["tasks", "tasks"]] },
+  { title: "② スレッド数", series: [["threads", "threads"]] },
+  {
+    title: "③ プールから貸し出し中の接続",
+    series: [["sync_checked_out", "同期エンジン"], ["async_checked_out", "非同期エンジン"]],
+    limit: () => limits.pool,
+  },
+  { title: "DB 側の接続", series: [["pg_active", "pg_sleep を実行中"], ["pg_conns", "接続の総数"]] },
+];
+
+const css = name => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+const COLOR = {
+  series: [css("--s1"), css("--s2")],
+  ink2: css("--ink2"), muted: css("--muted"), grid: css("--grid"), axis: css("--axis"), shade: css("--shade"),
+};
+const FONT = '11px system-ui, -apple-system, "Hiragino Sans", "Segoe UI", sans-serif';
+
+let rows = [];      // probe のサンプル（古い順）
+let events = [];    // bench.py が記録した出来事
+let limits = {};
+let session = null; // probe の起動時刻。変わったら probe が起動し直したので最初から取り直す
+let spans = [];     // /stats が返らなかった区間 [開始, 終了]（秒）
+let hoverIdx = null;
+
+const t0 = () => rows[0].timestamp;
+const fmt = v => (v == null ? "-" : String(v));
+
+function lastValue(key) {
+  for (let i = rows.length - 1; i >= 0; i--) if (rows[i][key] != null) return rows[i][key];
+  return null;
+}
+
+function silentSpans() {
+  const out = [];
+  let start = null;
+  for (const r of rows) {
+    const t = r.timestamp - t0();
+    if (r.tasks == null && start == null) start = t;
+    if (r.tasks != null && start != null) { out.push([start, t]); start = null; }
+  }
+  if (start != null) out.push([start, rows[rows.length - 1].timestamp - t0()]);
+  return out;
+}
+
+// 網かけ（系列より下）
+function drawShade(u) {
+  const { top, height } = u.bbox;
+  u.ctx.save();
+  u.ctx.fillStyle = COLOR.shade;
+  for (const [a, b] of spans) {
+    const x0 = u.valToPos(a, "x", true);
+    const x1 = u.valToPos(b, "x", true);
+    u.ctx.fillRect(x0, top, Math.max(x1 - x0, 1), height);
+  }
+  u.ctx.restore();
+}
+
+// 出来事の縦線と上限の横線（系列より上）。ラベルは一番上のパネルにだけ出す
+function drawMarks(u, panel, first) {
+  const { left, top, width, height } = u.bbox;
+  const pr = uPlot.pxRatio;
+  const ctx = u.ctx;
+  ctx.save();
+  ctx.lineWidth = pr;
+  ctx.strokeStyle = COLOR.muted;
+  ctx.fillStyle = COLOR.muted;
+  ctx.font = FONT.replace("11px", `${11 * pr}px`);
+  if (rows.length) {
+    for (const e of events) {
+      const t = e.timestamp - t0();
+      if (t < u.scales.x.min || t > u.scales.x.max) continue;
+      const x = Math.round(u.valToPos(t, "x", true)) + 0.5;
+      ctx.beginPath();
+      ctx.moveTo(x, top);
+      ctx.lineTo(x, top + height);
+      ctx.stroke();
+      if (first) {
+        ctx.textBaseline = "top";
+        ctx.fillText(e.label, x + 4 * pr, top + 2 * pr);
+      }
+    }
+  }
+  if (panel.limitValue) {
+    const y = Math.round(u.valToPos(panel.limitValue, "y", true)) + 0.5;
+    ctx.beginPath();
+    ctx.moveTo(left, y);
+    ctx.lineTo(left + width, y);
+    ctx.stroke();
+    ctx.textAlign = "right";
+    ctx.textBaseline = "bottom";
+    ctx.fillText(`上限 ${panel.limitValue}`, left + width - 4 * pr, y - 3 * pr);
+  }
+  ctx.restore();
+}
+
+// パネルの右上: ポインタの位置の値（なければ最新の値）
+function renderReadout(panel) {
+  const idx = hoverIdx ?? rows.length - 1;
+  const row = rows[idx];
+  const box = panel.readout;
+  box.replaceChildren();
+  if (!row) return;
+  const when = document.createElement("span");
+  when.className = "when";
+  when.textContent = hoverIdx == null ? "最新" : `${(row.timestamp - t0()).toFixed(1)} 秒`;
+  box.append(when);
+  panel.series.forEach(([key, label], j) => {
+    const item = document.createElement("span");
+    item.className = "item";
+    if (panel.series.length > 1) {
+      const k = document.createElement("span");
+      k.className = "key";
+      k.style.background = COLOR.series[j];
+      item.append(k);
+    }
+    const b = document.createElement("b");
+    b.textContent = fmt(row[key]);
+    item.append(b);
+    if (panel.series.length > 1) item.append(document.createTextNode(label));
+    box.append(item);
+  });
+}
+
+function makePanel(panel, i) {
+  const el = document.createElement("section");
+  el.className = "panel";
+  const head = document.createElement("div");
+  head.className = "head";
+  const h2 = document.createElement("h2");
+  h2.textContent = panel.title;
+  panel.readout = document.createElement("div");
+  panel.readout.className = "readout";
+  head.append(h2, panel.readout);
+  const chart = document.createElement("div");
+  chart.className = "chart";
+  el.append(head, chart);
+  document.getElementById("panels").append(el);
+
+  const last = i === PANELS.length - 1;
+  const opts = {
+    width: chart.clientWidth,
+    height: last ? 150 : 120,
+    legend: { show: false },
+    padding: [8, 20, last ? 0 : 8, 0],  // 左右は全パネルで同じにして、縦に並べたときの時間軸をそろえる
+    cursor: { sync: { key: "lab" }, y: false, drag: { x: false, y: false }, points: { size: 8 } },
+    scales: {
+      x: { time: false },
+      y: { range: (u, min, max) => [0, Math.max(max ?? 0, panel.limitValue ?? 0, 1) * 1.15] },
+    },
+    axes: [
+      {
+        show: last,
+        stroke: COLOR.ink2,
+        font: FONT,
+        grid: { show: false },
+        ticks: { stroke: COLOR.axis, width: 1 },
+        label: "probe を起動してからの秒数",
+        labelFont: FONT,
+        labelSize: 20,
+      },
+      {
+        stroke: COLOR.ink2,
+        font: FONT,
+        size: 48,
+        grid: { stroke: COLOR.grid, width: 1 },
+        ticks: { show: false },
+        incrs: [1, 2, 5, 10, 20, 50, 100, 200, 500, 1000, 2000, 5000, 10000],  // 件数なので目盛りは整数だけ
+      },
+    ],
+    series: [
+      {},
+      ...panel.series.map(([, label], j) => ({
+        label,
+        stroke: COLOR.series[j],
+        width: 2,
+        points: { show: false },
+      })),
+    ],
+    hooks: {
+      drawClear: [drawShade],
+      draw: [u => drawMarks(u, panel, i === 0)],
+      setCursor: [u => {
+        const idx = u.cursor.idx;
+        if (idx !== hoverIdx) {
+          hoverIdx = idx ?? null;
+          PANELS.forEach(renderReadout);
+        }
+      }],
+    },
+  };
+  panel.chartEl = chart;
+  panel.plot = new uPlot(opts, [[], ...panel.series.map(() => [])], chart);
+}
+
+function render() {
+  if (!rows.length) return;
+  spans = silentSpans();
+  const xs = rows.map(r => r.timestamp - t0());
+  for (const panel of PANELS) {
+    panel.limitValue = panel.limit ? panel.limit() : null;
+    panel.plot.setData([xs, ...panel.series.map(([key]) => rows.map(r => r[key] ?? null))]);
+    renderReadout(panel);
+  }
+  const last = rows[rows.length - 1];
+  document.getElementById("elapsed").textContent = `経過 ${(last.timestamp - t0()).toFixed(1)} 秒 · ${rows.length} サンプル`;
+  if (last.tasks == null) {
+    const since = spans[spans.length - 1][0];
+    setBadge("stats", "bad", `/stats が返らない（${(last.timestamp - t0() - since).toFixed(1)} 秒）`);
+  } else {
+    setBadge("stats", "ok", `/stats: ${last.stats_ms} ms`);
+  }
+}
+
+function setBadge(id, state, text) {
+  const el = document.getElementById(id);
+  el.className = `badge ${state}`;
+  el.querySelector(".text").textContent = text;
+}
+
+async function fetchData(from) {
+  const res = await fetch(`/data?from=${from}`, { cache: "no-store" });
+  if (!res.ok) throw new Error(res.statusText);
+  return res.json();
+}
+
+async function pollOnce() {
+  try {
+    let data = await fetchData(rows.length);
+    if (session !== null && data.started !== session) {
+      rows = [];
+      data = await fetchData(0);
+    }
+    session = data.started;
+    rows.push(...data.rows);
+    events = data.events;
+    limits = data.limits;
+    render();
+    setBadge("probe", "ok", "probe: 観測中");
+  } catch (err) {
+    setBadge("probe", "bad", "観測が止まっている（probe.py / bench.py を起動し直すと自動でつながる）");
+  }
+}
+
+async function main() {
+  if (typeof uPlot === "undefined") {
+    setBadge("probe", "bad", "グラフ描画ライブラリ（uPlot）を読み込めなかった。ネットワークと、ブラウザのコンソールを確認する");
+    return;
+  }
+  PANELS.forEach(makePanel);
+  window.addEventListener("resize", () => {
+    for (const p of PANELS) p.plot.setSize({ width: p.chartEl.clientWidth, height: p.plot.height });
+  });
+  for (;;) {
+    await pollOnce();
+    await new Promise(resolve => setTimeout(resolve, 500));
+  }
+}
+
+main();
+</script>
+</body>
+</html>
