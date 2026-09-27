@@ -7,23 +7,31 @@
 
 使い方:
   python probe.py                          # 画面に出すだけ（T2 の観測用）
+  python probe.py --live                   # ブラウザでグラフをリアルタイムに見る（http://127.0.0.1:8001/）
   python probe.py results/sync/probe.csv   # CSV にも書く。Ctrl+C で止める
 """
 import argparse
 import csv
 import http.client
+import http.server
 import json
+import os
 import re
 import shutil
 import subprocess
 import sys
+import threading
 import time
+import urllib.parse
 import urllib.request
+import webbrowser
 from pathlib import Path
 
 import psycopg
 
-from app import DSN
+from app import DSN, POOL
+
+LIVE_HTML = Path(__file__).with_name("live.html")
 
 FIELDS = [
     "timestamp",          # UNIX 時刻（秒）
@@ -160,6 +168,64 @@ def format_row(row):
     )
 
 
+class LiveServer:
+    """ブラウザでグラフをリアルタイムに見るための小さな HTTP サーバー
+
+    GET /                live.html
+    GET /data?from=<n>   n 本目以降のサンプルと、bench.py が記録した出来事（hey の開始・終了）
+    """
+
+    def __init__(self, port):
+        self.rows = []
+        self.events = []
+        self.started = time.time()  # ページはこれが変わったら probe が起動し直したと見て取り直す
+        self.limits = {"pool": POOL["pool_size"] + POOL["max_overflow"]}
+        self.url = f"http://127.0.0.1:{port}/"
+        live = self
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                url = urllib.parse.urlsplit(self.path)
+                if url.path == "/":
+                    body, ctype = LIVE_HTML.read_bytes(), "text/html; charset=utf-8"
+                elif url.path == "/data":
+                    start = urllib.parse.parse_qs(url.query).get("from", ["0"])[0]
+                    data = {
+                        "started": live.started,
+                        "rows": live.rows[int(start) if start.isdigit() else 0:],
+                        "events": live.events,
+                        "limits": live.limits,
+                    }
+                    body, ctype = json.dumps(data).encode(), "application/json"
+                else:
+                    self.send_error(404)
+                    return
+                self.send_response(200)
+                self.send_header("Content-Type", ctype)
+                self.send_header("Cache-Control", "no-store")
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, *args):
+                pass  # アクセスログで観測の表示を埋めない
+
+        try:
+            self.server = http.server.ThreadingHTTPServer(("127.0.0.1", port), Handler)
+        except OSError as e:
+            sys.exit(f"ライブ表示のポート {port} を開けない（{e.strerror}）。--live-port で変える")
+        threading.Thread(target=self.server.serve_forever, daemon=True).start()
+        print(f"ライブ表示: {self.url}")
+        # GUI のない Linux では、端末で動くブラウザが立ち上がって画面を取られないように開かない
+        if sys.platform == "darwin" or os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"):
+            webbrowser.open(self.url)
+
+    def add(self, row):
+        self.rows.append(row)
+
+    def event(self, label):
+        self.events.append({"timestamp": round(time.time(), 3), "label": label})
+
+
 class CsvLog:
     """1行ずつ flush する。途中で止めてもそこまでのデータは残る"""
 
@@ -182,16 +248,21 @@ def main():
     parser.add_argument("csv", nargs="?", help="書き出す CSV のパス（省略すると画面に出すだけ）")
     parser.add_argument("--interval", type=float, default=0.5, help="測定間隔（秒）")
     parser.add_argument("--port", type=int, default=8000)
+    parser.add_argument("--live", action="store_true", help="ブラウザでグラフをリアルタイムに見る")
+    parser.add_argument("--live-port", type=int, default=8001, help="ライブ表示のポート")
     args = parser.parse_args()
 
     probe = Probe(args.port)
     log = CsvLog(args.csv) if args.csv else None
+    live = LiveServer(args.live_port) if args.live else None
     try:
         for _ in ticks(args.interval):
             row = probe.sample()
             print(format_row(row), flush=True)
             if log:
                 log.write(row)
+            if live:
+                live.add(row)
     except KeyboardInterrupt:
         pass
     finally:

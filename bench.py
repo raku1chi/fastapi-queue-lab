@@ -4,6 +4,7 @@
   python bench.py sync                                                  # results/sync/ に保存
   python bench.py blocking --name blocking-backlog128 -- --backlog 128  # -- の後ろは uvicorn に渡す
   python bench.py async -n 100 -c 100 --name async-c100                 # 100 本を一度に
+  python bench.py sync --live                                           # ブラウザでグラフをリアルタイムに見ながら
 
 保存するもの（results/<name>/）
   hey.csv     hey -o csv の出力。応答が返ったリクエストだけが並ぶ（タイムアウトや接続エラーの行はない）
@@ -31,7 +32,7 @@ from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 
 from app import POOL
-from probe import CsvLog, PgCounter, Probe, format_row, get_stats, ticks
+from probe import CsvLog, LiveServer, PgCounter, Probe, format_row, get_stats, ticks
 
 ROOT = Path(__file__).resolve().parent
 ENDPOINTS = ["baseline", "blocking", "sync", "async"]
@@ -180,6 +181,8 @@ def main():
     parser.add_argument("--pre", type=float, default=3, help="負荷をかける前に観測しておく秒数")
     parser.add_argument("--max-drain", type=float, default=600, help="hey の後、後処理を見届ける最大秒数")
     parser.add_argument("--port", type=int, default=8000)
+    parser.add_argument("--live", action="store_true", help="観測値をブラウザでグラフにしてリアルタイムに見る")
+    parser.add_argument("--live-port", type=int, default=8001, help="ライブ表示のポート")
     args = parser.parse_args(argv)
 
     # 端末を閉じたときや kill されたときも Ctrl+C と同じ後片付け（uvicorn を止める）をする
@@ -192,6 +195,7 @@ def main():
     url = f"http://127.0.0.1:{args.port}/{args.endpoint}"
     hey_cmd = [hey_path, "-n", str(args.n), "-c", str(args.c), "-t", str(args.t), "-o", "csv", url]
 
+    live = LiveServer(args.live_port) if args.live else None
     server_log = open(run_dir / "server.log", "w")
     server, server_cmd = start_server(args.port, uvicorn_args, server_log)
 
@@ -227,6 +231,8 @@ def main():
             row = probe.sample()
             probe_log.write(row)
             print(format_row(row), flush=True)
+            if live:
+                live.add(row)
             now = time.monotonic()
             for key, peak in peaks.items():
                 # 負荷をかけ始めてからの最大値。/stats が一度も返らなければ None のまま（B）
@@ -246,6 +252,8 @@ def main():
                     meta["hey_start"] = time.time()
                     hey = subprocess.Popen(hey_cmd, stdout=hey_out)
                     phase = "load"
+                    if live:
+                        live.event("hey 開始")
             elif phase == "load":
                 if hey.poll() is not None:
                     meta["hey_end"] = time.time()
@@ -253,6 +261,8 @@ def main():
                     print(f"--- hey 終了（{took:.1f} 秒）。サーバー側の後処理を見届ける（Ctrl+C で打ち切り）")
                     phase = "drain"
                     drain_started = now
+                    if live:
+                        live.event("hey 終了")
             if phase == "drain":
                 idle_count = idle_count + 1 if is_idle(row, idle_tasks) else 0
                 if idle_count >= 2:
@@ -280,6 +290,8 @@ def main():
             f.close()
         (run_dir / "meta.json").write_text(json.dumps(meta, indent=2, ensure_ascii=False) + "\n")
 
+    if live:
+        time.sleep(1.5)  # 開いているページが最後のサンプルと出来事を取りに来るのを待ってから終わる
     if "hey_end" in meta:
         summarize(run_dir, args.n, peaks)
     print(f"\n保存先: {run_dir.relative_to(ROOT)}/")
