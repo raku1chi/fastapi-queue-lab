@@ -6,9 +6,9 @@
   DB 側                      pg_stat_activity（アプリのプールとは別に、専用の接続を1本張って数える）
 
 使い方:
-  python probe.py                          # 画面に出すだけ（T2 の観測用）
-  python probe.py --live                   # ブラウザでグラフをリアルタイムに見る（http://127.0.0.1:8001/）
-  python probe.py results/sync/probe.csv   # CSV にも書く。Ctrl+C で止める
+  uv run probe.py                          # 画面に出すだけ（T2 の観測用）
+  uv run probe.py --live                   # ブラウザでグラフをリアルタイムに見る（http://127.0.0.1:8001/）
+  uv run probe.py results/sync/probe.csv   # CSV にも書く。Ctrl+C で止める
 """
 import argparse
 import csv
@@ -210,7 +210,9 @@ class LiveServer:
                 pass  # アクセスログで観測の表示を埋めない
 
         try:
-            self.server = http.server.ThreadingHTTPServer(("127.0.0.1", port), Handler)
+            # Docker の中では公開したポートから届くように LIVE_HOST=0.0.0.0 で待ち受ける（compose.yaml）
+            host = os.environ.get("LIVE_HOST", "127.0.0.1")
+            self.server = http.server.ThreadingHTTPServer((host, port), Handler)
         except OSError as e:
             sys.exit(f"ライブ表示のポート {port} を開けない（{e.strerror}）。--live-port で変える")
         threading.Thread(target=self.server.serve_forever, daemon=True).start()

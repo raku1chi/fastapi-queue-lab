@@ -1,0 +1,20 @@
+[project]
+name = "fastapi-queue-lab"
+version = "0.1.0"
+description = "FastAPI に 1000 並列を叩いて、どこが詰まるかを見る実験"
+# 手元でも Docker（python:3.12-slim）でも同じ 3.12 で測る。uv が手元にない版を入れる
+requires-python = "==3.12.*"
+dependencies = [
+    # 素の uvicorn（asyncio + h11）で測る。uvicorn[standard] にすると uvloop / httptools に替わり、①②の挙動が変わる
+    "fastapi==0.141.1",
+    "uvicorn==0.54.0",
+    # [asyncio] を付けないと、Apple Silicon の Mac では greenlet が入らず、/async が起動時にエラーになる
+    "sqlalchemy[asyncio]==2.1.1",
+    "psycopg[binary]==3.3.6",
+    # plot.py 用
+    "matplotlib==3.11.2",
+]
+
+[tool.uv]
+# パッケージとしては配らない。uv sync は依存ライブラリだけを入れる
+package = false

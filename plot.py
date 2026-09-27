@@ -1,17 +1,23 @@
 """
 results/ のデータからグラフを描き、予想との対照表を出す
 
-  python plot.py              # results/ にある run をすべて描いて figures/ に書き出す
-  python plot.py sync async   # 指定した run だけ
+  uv run plot.py                           # results/ の run をすべて描いて figures/ に書き出す
+  uv run plot.py sync async                # 指定した名前の run だけ
+  uv run plot.py --results results/stable  # ぶれない設定の結果。figures/stable/ に書き出す
+  docker compose run --rm plot             # Docker で（日本語フォント入り）
 
-  figures/status.png           結果の内訳（200 / 500 / 応答なし）を A〜D で並べたもの
-  figures/responses.png        応答が返ったタイミング（累積）を A〜D で並べたもの
-  figures/timeline-<name>.png  run ごとの時系列: クライアントが受け取った応答と、①②③ の観測値
+  status.png           結果の内訳（200 / 500 / 応答なし）を A〜D で並べたもの
+  responses.png        応答が返ったタイミング（累積）を A〜D で並べたもの
+  timeline-<name>.png  run ごとの時系列: クライアントが受け取った応答と、①②③ の観測値
+
+--repeat で繰り返した run は、200 の件数が中央値の回で図を描き、対照表には中央値と幅を出す。
 """
 import argparse
 import csv
 import json
 import logging
+import os
+import statistics
 from pathlib import Path
 
 import matplotlib
@@ -114,7 +120,8 @@ def load_run(run_dir):
     for row in probe:
         row["t"] = row["timestamp"] - t0
     return {
-        "name": run_dir.name,
+        "name": run_dir.parent.name,
+        "repeat": meta.get("repeat", 1),
         "endpoint": meta["endpoint"],
         "meta": meta,
         "responses": responses,
@@ -133,6 +140,32 @@ def outcome(run):
         "その他": len(codes) - ok - error,
         "応答なし": run["meta"]["requests"] - len(codes),
     }
+
+
+def load_groups(results_dir, names):
+    """results/<name>/<何回目>/ を name ごとにまとめて読む。hey が終わる前に止めた回は飛ばす"""
+    groups = []
+    for group_dir in sorted(p for p in results_dir.iterdir() if p.is_dir()):
+        if names and group_dir.name not in names:
+            continue
+        runs = []
+        for run_dir in sorted((d for d in group_dir.iterdir() if d.name.isdigit()), key=lambda d: int(d.name)):
+            meta_path = run_dir / "meta.json"
+            if not meta_path.exists():
+                continue
+            if "hey_end" not in json.loads(meta_path.read_text()):
+                print(f"スキップ: {group_dir.name}/{run_dir.name}（hey が終わる前に止めた回）")
+                continue
+            runs.append(load_run(run_dir))
+        if runs:
+            groups.append(runs)
+    return groups
+
+
+def representative(runs):
+    """200 の件数が中央値の回（偶数回なら少ない方）。図はこの回で描き、runs に全部の回を持たせる"""
+    ranked = sorted(runs, key=lambda r: (outcome(r)["200"], r["repeat"]))
+    return {**ranked[(len(ranked) - 1) // 2], "runs": runs}
 
 
 def label_of(run):
@@ -182,7 +215,10 @@ def plot_status(runs, path):
     present = [key for key in colors if any(key == k for _, k, _, _ in segments)]
     handles = [Patch(color=colors[key], label=key) for key in present]
     ax.legend(handles=handles, loc="lower left", bbox_to_anchor=(0, 1.02), ncol=len(handles))
-    ax.set_title(f"{n} 並列で叩いた結果の内訳（クライアント側のタイムアウト {runs[0]['meta']['client_timeout']} 秒）", pad=28)
+    title = f"{n} 並列で叩いた結果の内訳（クライアント側のタイムアウト {runs[0]['meta']['client_timeout']} 秒）"
+    if any(len(r["runs"]) > 1 for r in runs):
+        title += "\n繰り返した条件は、200 の件数が中央値の回"
+    ax.set_title(title, pad=28)
     fig.tight_layout()
 
     # レイアウトが決まってから、数字が棒の中に入るかを測る。入らないものは棒の右に回す
@@ -306,7 +342,10 @@ def plot_timeline(run, path):
                 mark_time(ax, t, text if i == 0 else None)
     axes[-1].set_xlim(start, end)
     axes[-1].set_xlabel("負荷をかけ始めてからの秒数")
-    fig.suptitle(label_of(run), x=0.01, ha="left", fontsize=11, color=INK, fontweight="bold")
+    title = label_of(run)
+    if len(run["runs"]) > 1:
+        title += f"　{len(run['runs'])} 回のうち 200 が中央値の {run['repeat']} 回目"
+    fig.suptitle(title, x=0.01, ha="left", fontsize=11, color=INK, fontweight="bold")
     fig.tight_layout()
     fig.savefig(path, dpi=200)
     plt.close(fig)
@@ -321,47 +360,59 @@ def print_table(runs):
     def fmt(v):
         return "-" if v is None else f"{v:.0f}"
 
-    print("| エンドポイント | 予想（200） | 200 | 500 | 応答なし | threads | tasks | checked out | accept queue | pg_sleep |")
-    print("|---|---|---|---|---|---|---|---|---|---|")
+    def spread(run, key):
+        """1 回なら件数、繰り返したなら 中央値（最小〜最大）"""
+        values = [outcome(r)[key] for r in run["runs"]]
+        median = f"{statistics.median(values):g}"
+        return median if min(values) == max(values) else f"{median}（{min(values)}〜{max(values)}）"
+
+    print("| エンドポイント | 回数 | 予想（200） | 200 | 500 | 応答なし | threads | tasks | checked out | accept queue | pg_sleep |")
+    print("|---|---|---|---|---|---|---|---|---|---|---|")
     for run in runs:
-        o = outcome(run)
         predicted = PREDICTED_OK[run["endpoint"]] if run["name"] == run["endpoint"] else "-"
         pools = [v for v in (peak(run, "sync_checked_out"), peak(run, "async_checked_out")) if v is not None]
         print(
-            f"| {label_of(run)} | {predicted} | {o['200']} | {o['500']} | {o['応答なし']} "
+            f"| {label_of(run)} | {len(run['runs'])} | {predicted} "
+            f"| {spread(run, '200')} | {spread(run, '500')} | {spread(run, '応答なし')} "
             f"| {fmt(peak(run, 'threads'))} | {fmt(peak(run, 'tasks'))} | {fmt(max(pools, default=None))} "
             f"| {fmt(peak(run, 'qlen'))} | {fmt(peak(run, 'pg_active'))} |"
         )
-    print("\nthreads 以降は負荷をかけ始めてからの最大値。- は /stats が返らず測れなかった。")
+    print("\n200・500・応答なしは、繰り返した run では中央値（最小〜最大）。")
+    print("threads 以降は、200 が中央値の回の、負荷をかけ始めてからの最大値。- は /stats が返らず測れなかった。")
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("names", nargs="*", help="results/ の下の run 名（省略するとすべて）")
+    parser.add_argument("--results", default=os.environ.get("RESULTS_DIR", "results"),
+                        help="読む結果のディレクトリ（既定は環境変数 RESULTS_DIR か results）")
     args = parser.parse_args()
 
-    dirs = [RESULTS / n for n in args.names] if args.names else sorted(p.parent for p in RESULTS.glob("*/meta.json"))
-    runs = []
-    for d in dirs:
-        if "hey_end" not in json.loads((d / "meta.json").read_text()):
-            print(f"スキップ: {d.name}（hey が終わる前に止めた run）")
-            continue
-        runs.append(load_run(d))
+    results_dir = (ROOT / args.results).resolve()
+    try:
+        out_dir = FIGURES / results_dir.relative_to(RESULTS)  # results/stable → figures/stable
+    except ValueError:
+        out_dir = FIGURES / results_dir.name
+    if not results_dir.is_dir():
+        raise SystemExit(f"{args.results} がない。先に bench.py <endpoint> を実行する")
     order = list(LABELS)
-    runs.sort(key=lambda r: (order.index(r["endpoint"]), r["name"] != r["endpoint"], r["name"]))
+    runs = sorted(
+        (representative(g) for g in load_groups(results_dir, args.names)),
+        key=lambda r: (order.index(r["endpoint"]), r["name"] != r["endpoint"], r["name"]),
+    )
     if not runs:
-        raise SystemExit("results/ にデータがない。先に python bench.py <endpoint> を実行する")
+        raise SystemExit(f"{args.results} にデータがない。先に bench.py <endpoint> を実行する")
 
     setup_style()
-    FIGURES.mkdir(exist_ok=True)
+    out_dir.mkdir(parents=True, exist_ok=True)
     main_runs = [r for r in runs if r["name"] == r["endpoint"]]
     if main_runs:
-        plot_status(main_runs, FIGURES / "status.png")
-        plot_responses(main_runs, FIGURES / "responses.png")
+        plot_status(main_runs, out_dir / "status.png")
+        plot_responses(main_runs, out_dir / "responses.png")
     for run in runs:
-        plot_timeline(run, FIGURES / f"timeline-{run['name']}.png")
+        plot_timeline(run, out_dir / f"timeline-{run['name']}.png")
     print_table(runs)
-    print(f"\nグラフ: {FIGURES.relative_to(ROOT)}/")
+    print(f"\nグラフ: {out_dir.relative_to(ROOT)}/")
 
 
 if __name__ == "__main__":

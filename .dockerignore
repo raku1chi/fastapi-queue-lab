@@ -1,0 +1,5 @@
+# イメージに入れるのは依存ライブラリの定義だけ（ソースは compose.yaml でマウントする）
+*
+!pyproject.toml
+!uv.lock
+!.python-version

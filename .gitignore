@@ -1,3 +1,9 @@
 .venv/
 __pycache__/
 .DS_Store
+
+# plot.py の出力。results/ から何度でも作り直せる（記事に使う図はブログのリポジトリに置く）
+/figures/
+# uvicorn のログ。D では 1 回で数 MB のトレースバックになり、手元で回すと自分のホームのパスも入るので公開しない
+# results/ の残り（hey.csv・probe.csv・meta.json）は記事の数字の元データとしてコミットする
+results/**/server.log

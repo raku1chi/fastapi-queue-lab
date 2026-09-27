@@ -6,6 +6,7 @@ FastAPI 詰まり実験
 4本のエンドポイントで、詰まる場所を1つずつ切り替えて見る。
 """
 import asyncio
+import os
 import threading
 import time
 
@@ -13,10 +14,16 @@ from fastapi import FastAPI
 from sqlalchemy import create_engine, text
 from sqlalchemy.ext.asyncio import create_async_engine
 
-DSN = "postgresql+psycopg://exp:exp@127.0.0.1:5432/exp"
+# Docker の中から動かすときは compose.yaml が db:5432 に向け直す
+DSN = os.environ.get("DSN", "postgresql+psycopg://exp:exp@127.0.0.1:5432/exp")
 
 # SQLAlchemyのデフォルト値をそのまま明示。同時15接続、空きを30秒待って諦める
-POOL = dict(pool_size=5, max_overflow=10, pool_timeout=30)
+# ぶれない設定（stable.env）や発展実験では環境変数で変える
+POOL = dict(
+    pool_size=int(os.environ.get("POOL_SIZE", 5)),
+    max_overflow=int(os.environ.get("MAX_OVERFLOW", 10)),
+    pool_timeout=int(os.environ.get("POOL_TIMEOUT", 30)),
+)
 
 engine = create_engine(DSN, **POOL)
 aengine = create_async_engine(DSN, **POOL)
