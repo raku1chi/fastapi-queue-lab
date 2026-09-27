@@ -35,7 +35,7 @@ DB の遅さは `pg_sleep(5)` で作り、`hey` で 1000 並列を叩く。エ�
 | `stable.env` | ぶれない設定（[ぶれない設定](#ぶれない設定)） |
 | `compose.yaml` | Postgres 16 と、実験を Docker の中で回す `lab` / `lab-stable`、グラフを描く `plot`（[Docker で回す](#docker-で回す)） |
 | `Dockerfile` | `lab` と `plot` の実行環境（Python 3.12、`uv.lock` の依存ライブラリ、hey、ss、日本語フォント） |
-| `results/` | 生データ |
+| `results/` | 生データ。記事の数字の元データとしてコミットする（`server.log` は除く） |
 
 回し方は 2 通りある。
 
@@ -140,7 +140,7 @@ uv run bench.py async      # 1 分ほど
 |---|---|
 | `hey.csv` | `hey -o csv` の出力。応答が返ったリクエストだけが並ぶ。タイムアウトや接続エラーの行はないので、リクエスト数との差が「応答なし」 |
 | `probe.csv` | 観測値の時系列（列は下の表） |
-| `server.log` | uvicorn の出力。D の `TimeoutError` のトレースバックもここに残る |
+| `server.log` | uvicorn の出力。D の `TimeoutError` のトレースバックもここに残る。大きくなり、手元のパスも入るのでコミットしない（`.gitignore`） |
 | `meta.json` | 実行条件（コマンド、プール設定、OS、コンテナの中か、ライブラリのバージョン、somaxconn）と時刻。`hey_start` がグラフの時間軸の 0 秒 |
 
 | `probe.csv` の列 | 中身 |
@@ -218,7 +218,7 @@ docker compose run --rm plot                          # Docker で（日本語�
 docker compose run --rm plot --results results/stable
 ```
 
-日本語のフォントは、手元の Mac ではヒラギノ、Docker では Noto Sans CJK JP になる。記事の図をそろえたいなら、どちらか一方で描く。
+日本語のフォントは、手元の Mac ではヒラギノ、Docker では Noto Sans CJK JP になる。記事の図をそろえたいなら、どちらか一方で描く。`figures/` は `results/` からいつでも作り直せるのでコミットしない（`.gitignore`）。記事に使う図はブログのリポジトリへコピーする。
 
 次のグラフを書き出し、予想と実測の対照表を Markdown で画面に出す。`--repeat` で繰り返した条件は、200 の件数が中央値の回でグラフを描き、対照表には中央値（最小〜最大）を出す。
 
