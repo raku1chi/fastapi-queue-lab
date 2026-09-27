@@ -1,11 +1,12 @@
 """
 データ取り: uvicorn を起動 → probe で観測しながら hey で負荷 → 後処理が終わるまで見届けて保存
 
-  python bench.py sync                                                  # results/sync/1/ に保存
-  python bench.py async --repeat 3                                      # 3 回回して results/async/1〜3/ に。中央値と幅も出す
-  python bench.py blocking --name blocking-backlog128 -- --backlog 128  # -- の後ろは uvicorn に渡す
-  python bench.py async -n 100 -c 100 --name async-c100                 # 100 本を一度に
-  python bench.py sync --live                                           # ブラウザでグラフをリアルタイムに見ながら
+  uv run bench.py sync                                                  # results/sync/1/ に保存
+  uv run bench.py async --repeat 3                                      # 3 回回して results/async/1〜3/ に。中央値と幅も出す
+  uv run bench.py blocking --name blocking-backlog128 -- --backlog 128  # -- の後ろは uvicorn に渡す
+  uv run bench.py async -n 100 -c 100 --name async-c100                 # 100 本を一度に
+  uv run bench.py sync --live                                           # ブラウザでグラフをリアルタイムに見ながら
+  uv run --env-file stable.env bench.py async --repeat 3               # ぶれない設定で（Docker の中では python bench.py ...）
 
 保存するもの（results/<name>/<何回目>/）
   hey.csv     hey -o csv の出力。応答が返ったリクエストだけが並ぶ（タイムアウトや接続エラーの行はない）
@@ -285,7 +286,7 @@ def main():
     parser = argparse.ArgumentParser(
         description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter,
-        usage="python bench.py {%s} [options] [-- uvicorn の引数 ...]" % ",".join(ENDPOINTS),
+        usage="bench.py {%s} [options] [-- uvicorn の引数 ...]" % ",".join(ENDPOINTS),
     )
     parser.add_argument("endpoint", choices=ENDPOINTS)
     parser.add_argument("--name", help="保存先 results/<name>/（省略時はエンドポイント名）")

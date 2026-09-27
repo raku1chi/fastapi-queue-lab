@@ -31,9 +31,10 @@ DB の遅さは `pg_sleep(5)` で作り、`hey` で 1000 並列を叩く。エ�
 | `live.html` | `--live` を付けたときにブラウザで開く、リアルタイムのグラフ |
 | `bench.py` | データ取り。uvicorn を起動し、probe で観測しながら hey で負荷をかけ、`results/<name>/<何回目>/` に保存する |
 | `plot.py` | `results/` からグラフ（`figures/`）と、予想と実測の対照表を作る |
+| `pyproject.toml` / `uv.lock` | 依存ライブラリ。`uv.lock` が間接的な依存まで含めてバージョンを固定する（手元も Docker も同じもの） |
 | `stable.env` | ぶれない設定（[ぶれない設定](#ぶれない設定)） |
-| `compose.yaml` | Postgres 16 と、実験を Docker の中で回す `lab` / `lab-stable`（[Docker で回す](#docker-で回す)） |
-| `Dockerfile` | `lab` の実行環境（Python 3.12、依存ライブラリ、hey、ss） |
+| `compose.yaml` | Postgres 16 と、実験を Docker の中で回す `lab` / `lab-stable`、グラフを描く `plot`（[Docker で回す](#docker-で回す)） |
+| `Dockerfile` | `lab` と `plot` の実行環境（Python 3.12、`uv.lock` の依存ライブラリ、hey、ss、日本語フォント） |
 | `results/` | 生データ |
 
 回し方は 2 通りある。
@@ -43,14 +44,15 @@ DB の遅さは `pg_sleep(5)` で作り、`hey` で 1000 並列を叩く。エ�
 
 ## 準備（手元で回す）
 
-Python 3.11 以上、Docker、[hey](https://github.com/rakyll/hey) を使う。
+[uv](https://docs.astral.sh/uv/)、Docker、[hey](https://github.com/rakyll/hey) を使う。
 
 ```bash
-brew install hey          # ab は -c 1000 で接続エラーを出しやすいので hey を使う
+brew install uv hey       # ab は -c 1000 で接続エラーを出しやすいので hey を使う
 docker compose up -d
-python3 -m venv .venv && source .venv/bin/activate
-pip install -r requirements.txt
+uv sync                   # .venv に Python 3.12 と uv.lock のとおりの依存ライブラリを入れる（Python がなければ uv が入れる）
 ```
+
+以下のコマンドは `uv run` を付けて動かす（`.venv` を有効にしなくてよい）。
 
 **macOS 固有の前提**（ここで詰まると実験が始まらない）
 
@@ -60,7 +62,7 @@ pip install -r requirements.txt
 **Linux の場合**
 
 - hey は `go install github.com/rakyll/hey@latest` などで入れる
-- somaxconn は 4096 前後で、uvicorn のデフォルトの backlog 2048 がそのまま効く。1000 本なら全部 ① に収まってあふれないので、B は `python bench.py blocking --name blocking-backlog128 -- --backlog 128` のように backlog を 128 にすると macOS と同じ条件になる（Docker で回すなら compose.yaml が 128 に固定する）
+- somaxconn は 4096 前後で、uvicorn のデフォルトの backlog 2048 がそのまま効く。1000 本なら全部 ① に収まってあふれないので、B は `uv run bench.py blocking --name blocking-backlog128 -- --backlog 128` のように backlog を 128 にすると macOS と同じ条件になる（Docker で回すなら compose.yaml が 128 に固定する）
 - ① は `ss -ltn 'sport = :8000'` で見る（LISTEN ソケットの Recv-Q が今の長さ、Send-Q が上限）。`probe.py` は `ss` がなければ `/proc/net/tcp` から今の長さだけを読む
 
 **その他**
@@ -74,10 +76,10 @@ pip install -r requirements.txt
 ```bash
 # T1: サーバー
 ulimit -n 10240
-uvicorn app:app --port 8000 --no-access-log
+uv run uvicorn app:app --port 8000 --no-access-log
 
 # T2: 観測（①②③ と DB 側を 0.5 秒ごとに表示し続ける）
-python probe.py
+uv run probe.py
 
 # T3: 負荷。サマリ（エラーの内訳が出る）は残しておく
 ulimit -n 10240
@@ -94,7 +96,7 @@ A → B → C → D の順に、1 本ごとに T1 の uvicorn を起動し直し
 
 ### グラフをリアルタイムに見る
 
-T2 を `python probe.py --live` にすると、ブラウザが開き（http://127.0.0.1:8001/）、①②③ と DB 側のグラフが 0.5 秒ごとに伸びていく。
+T2 を `uv run probe.py --live` にすると、ブラウザが開き（http://127.0.0.1:8001/）、①②③ と DB 側のグラフが 0.5 秒ごとに伸びていく。
 
 - 網かけは `/stats` が返らなかった区間。B の間ずっと広がっていく
 - グラフにポインタを置くと、その時点の値が全パネルの右上に出る
@@ -117,10 +119,10 @@ docker compose exec -T db psql -U exp -tAc \
 `bench.py` で回す。uvicorn の起動と停止も `bench.py` がやるので、T1 の uvicorn は止めておく。
 
 ```bash
-python bench.py baseline   # 15 秒ほど
-python bench.py blocking   # 1 分半ほど
-python bench.py sync       # hey は 60 秒で終わるが、サーバーの後処理を見届けるので 6 分ほど
-python bench.py async      # 1 分ほど
+uv run bench.py baseline   # 15 秒ほど
+uv run bench.py blocking   # 1 分半ほど
+uv run bench.py sync       # hey は 60 秒で終わるが、サーバーの後処理を見届けるので 6 分ほど
+uv run bench.py async      # 1 分ほど
 ```
 
 `--repeat 3` のように付けると同じ条件で 3 回回し、最後に回ごとの件数と中央値・幅を出す。uvicorn は 1 回ごとに起動し直す。`--live` を付けると、データを取りながらブラウザでグラフを見られる（[グラフをリアルタイムに見る](#グラフをリアルタイムに見る)）。
@@ -171,34 +173,34 @@ hey のサマリ（エラーの内訳）は `-o csv` と同時に出せないの
 締め切りを区切りからずらしたので、200 の件数は B が 12 回分、C が 12 回分（15 × 12 = 180）、D が 6 回分（15 × 6 = 90）に決まる。計画の予想（約 12・約 180・約 90）は、この 2 つのぶれがないときの値に当たる。
 
 ```bash
-# 手元で回す（サブシェルの中で読み込むので、今のシェルには残らない）
-(set -a; . ./stable.env; python bench.py async --repeat 3)
-(set -a; . ./stable.env; python plot.py)      # results/stable/ を読んで figures/stable/ に書く
+# 手元で回す
+uv run --env-file stable.env bench.py async --repeat 3
+uv run --env-file stable.env plot.py          # results/stable/ を読んで figures/stable/ に書く
 
 # Docker で回す
 docker compose run --rm lab-stable python bench.py async --repeat 3
-python plot.py --results results/stable
+docker compose run --rm plot --results results/stable
 ```
 
 既定の設定のまま記事に載せるなら、`--repeat` で数回回して中央値と幅で書く。既定の設定と `stable.env` の結果を並べると、ぶれの原因がこの 2 つだったことを示せる。
 
 ## Docker で回す
 
-uvicorn・probe・hey を 1 つのコンテナで動かし、条件を compose.yaml で固定する。
+uvicorn・probe・hey を 1 つのコンテナで動かし、条件を compose.yaml で固定する。グラフも `plot` で Docker の中で描けるので、手元には Docker だけあればよい（uv も Python も要らない）。
 
 | 固定するもの | 値 | 手元で回すときとの違い |
 |---|---|---|
-| Python とライブラリ | Python 3.12、`requirements.txt` のバージョン | 手元は入っている Python による |
+| Python とライブラリ | Python 3.12、`uv.lock` のバージョン | 同じ（手元も uv で 3.12 と `uv.lock` を使う） |
 | ① の上限（somaxconn） | 128 | macOS と同じ。Linux の既定（4096）には左右されない |
 | ファイルディスクリプタの上限 | 10240 | `ulimit -n` を打たなくてよい |
 | CPU | 2 つ分 | 手元はマシン全体 |
 
 ```bash
-docker compose build lab                               # 初回と、requirements.txt を変えたとき
+docker compose build lab                               # 初回と、pyproject.toml / uv.lock を変えたとき（lab・lab-stable・plot で共通のイメージ）
 docker compose run --rm lab python bench.py sync       # results/sync/ に出る
 docker compose run --rm --service-ports lab python bench.py sync --live   # ライブ表示つき。http://127.0.0.1:8001/ を開く
 docker compose run --rm lab-stable python bench.py async --repeat 3       # ぶれない設定。results/stable/ に出る
-python plot.py                                         # グラフは手元で描く（日本語フォントのため）
+docker compose run --rm plot                           # グラフと対照表。figures/ に出る
 ```
 
 - **負荷はコンテナの中からかける。** uvicorn だけをコンテナに入れてポートを公開し、ホストの hey から叩くと、Docker のポート転送のプロセスが先に接続を受け取ってしまう。hey からはすべての接続がすぐにつながったように見え、① の詰まりはコンテナの中に隠れる。`lab` は uvicorn・probe・hey を同じコンテナで動かすので、① を uvicorn のソケットで観測できる
@@ -210,9 +212,13 @@ python plot.py                                         # グラフは手元で�
 ## グラフと対照表
 
 ```bash
-python plot.py                            # results/ → figures/
-python plot.py --results results/stable   # results/stable/ → figures/stable/
+uv run plot.py                                        # results/ → figures/
+uv run plot.py --results results/stable               # results/stable/ → figures/stable/
+docker compose run --rm plot                          # Docker で（日本語フォント入り）
+docker compose run --rm plot --results results/stable
 ```
+
+日本語のフォントは、手元の Mac ではヒラギノ、Docker では Noto Sans CJK JP になる。記事の図をそろえたいなら、どちらか一方で描く。
 
 次のグラフを書き出し、予想と実測の対照表を Markdown で画面に出す。`--repeat` で繰り返した条件は、200 の件数が中央値の回でグラフを描き、対照表には中央値（最小〜最大）を出す。
 
@@ -225,10 +231,10 @@ python plot.py --results results/stable   # results/stable/ → figures/stable/
 `--name` で保存先を分け、`--` の後ろに書いた引数は uvicorn に渡す。プールの設定は環境変数で変えられる。
 
 ```bash
-python bench.py sync --name sync-workers4 -- --workers 4           # プロセスごとにプールもスレッドプールも独立する
-python bench.py blocking --name blocking-backlog16 -- --backlog 16 # ① をさらに小さくする
-python bench.py sync -n 100 -c 100 --name sync-c100                # 並列数を落として、詰まらなくなる閾値を探す
-POOL_SIZE=100 MAX_OVERFLOW=200 python bench.py async --name async-pool300   # ③ をゆるめたとき、次に詰まるのが DB そのもの（max_connections=100）かを見る
+uv run bench.py sync --name sync-workers4 -- --workers 4           # プロセスごとにプールもスレッドプールも独立する
+uv run bench.py blocking --name blocking-backlog16 -- --backlog 16 # ① をさらに小さくする
+uv run bench.py sync -n 100 -c 100 --name sync-c100                # 並列数を落として、詰まらなくなる閾値を探す
+POOL_SIZE=100 MAX_OVERFLOW=200 uv run bench.py async --name async-pool300   # ③ をゆるめたとき、次に詰まるのが DB そのもの（max_connections=100）かを見る
 ```
 
 - **1 行直す**: B の `time.sleep(5)` を `await asyncio.sleep(5)` に変えて、A と同じ挙動になるかを見る
@@ -250,5 +256,5 @@ Docker で回すときは `docker compose run --rm -e POOL_SIZE=100 -e MAX_OVERF
 - `--workers` を付けると、`/stats` はどれか 1 プロセスの値しか返さない。DB 側の `pg_active` / `pg_conns` は全プロセスの合計
 - probe の `/stats` リクエストも accept queue を通る。backlog に余裕がある Linux で B を回すと、返ってこない probe の接続が毎秒 1 本ずつ ① に積まれる
 - `tasks` には uvicorn 自身のタスク（アイドル時で 3 本）も入る
-- Python 3.11 では `asyncio.wait_for` が待つたびに内部でタスクを 1 本作るので、D の `tasks` はリクエスト数の約 2 倍になる（3.12 以降は作らない）。Python のバージョンは `meta.json` に残る
+- Python 3.11 では `asyncio.wait_for` が待つたびに内部でタスクを 1 本作るので、D の `tasks` はリクエスト数の約 2 倍になる（3.12 以降は作らない）。このリポジトリは手元（uv）も Docker も 3.12 に固定している。Python のバージョンは `meta.json` に残る
 - Docker で回すと DB の接続先がホスト名（`db`）になり、非同期ドライバがその名前解決をスレッドで行う。そのため D でもスレッドが数本増える

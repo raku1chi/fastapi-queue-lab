@@ -1,9 +1,10 @@
 """
 results/ のデータからグラフを描き、予想との対照表を出す
 
-  python plot.py                           # results/ の run をすべて描いて figures/ に書き出す
-  python plot.py sync async                # 指定した名前の run だけ
-  python plot.py --results results/stable  # ぶれない設定の結果。figures/stable/ に書き出す
+  uv run plot.py                           # results/ の run をすべて描いて figures/ に書き出す
+  uv run plot.py sync async                # 指定した名前の run だけ
+  uv run plot.py --results results/stable  # ぶれない設定の結果。figures/stable/ に書き出す
+  docker compose run --rm plot             # Docker で（日本語フォント入り）
 
   status.png           結果の内訳（200 / 500 / 応答なし）を A〜D で並べたもの
   responses.png        応答が返ったタイミング（累積）を A〜D で並べたもの
@@ -393,14 +394,14 @@ def main():
     except ValueError:
         out_dir = FIGURES / results_dir.name
     if not results_dir.is_dir():
-        raise SystemExit(f"{args.results} がない。先に python bench.py <endpoint> を実行する")
+        raise SystemExit(f"{args.results} がない。先に bench.py <endpoint> を実行する")
     order = list(LABELS)
     runs = sorted(
         (representative(g) for g in load_groups(results_dir, args.names)),
         key=lambda r: (order.index(r["endpoint"]), r["name"] != r["endpoint"], r["name"]),
     )
     if not runs:
-        raise SystemExit(f"{args.results} にデータがない。先に python bench.py <endpoint> を実行する")
+        raise SystemExit(f"{args.results} にデータがない。先に bench.py <endpoint> を実行する")
 
     setup_style()
     out_dir.mkdir(parents=True, exist_ok=True)

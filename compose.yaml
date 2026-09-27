@@ -41,3 +41,14 @@ services:
     profiles: [lab]
     depends_on: [db]
     env_file: stable.env
+
+  # グラフと対照表を作る（日本語フォント入り）。DB も負荷も使わない
+  #   docker compose run --rm plot                           # results/ → figures/
+  #   docker compose run --rm plot --results results/stable  # results/stable/ → figures/stable/
+  plot:
+    build: .
+    image: fastapi-queue-lab
+    profiles: [lab]
+    volumes:
+      - .:/lab
+    entrypoint: ["python", "plot.py"]
