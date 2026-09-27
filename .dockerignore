@@ -1,0 +1,3 @@
+# イメージに入れるのは依存ライブラリだけ（ソースは compose.yaml でマウントする）
+*
+!requirements.txt

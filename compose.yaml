@@ -10,3 +10,34 @@ services:
       - "5432:5432"
     # 発展実験(④DB自体の上限)で触る。デフォルトは max_connections=100
     # command: postgres -c max_connections=100
+
+  # 実験を Docker の中で回す（README「Docker で回す」）。docker compose up -d では起動せず、run で使う
+  #   docker compose run --rm lab python bench.py sync
+  # uvicorn・probe・hey を同じコンテナで動かすので、① を uvicorn のソケットで観測できる
+  # （ホストから公開ポート越しに叩くと、Docker の転送プロセスが先に接続を受け取ってしまう）
+  lab:
+    build: .
+    image: fastapi-queue-lab
+    profiles: [lab]
+    depends_on: [db]
+    environment:
+      DSN: postgresql+psycopg://exp:exp@db:5432/exp
+      LIVE_HOST: 0.0.0.0        # ライブ表示をコンテナの外（ブラウザ）から開けるように
+    sysctls:
+      net.core.somaxconn: 128   # macOS と同じ上限にそろえる（Linux の既定は 4096）
+    ulimits:
+      nofile: 10240             # ulimit -n 10240 の代わり
+    cpus: 2                     # 使える CPU をそろえる
+    volumes:
+      - .:/lab                  # ソースは手元のものを使う。結果も手元の results/ に出る
+    ports:
+      - "127.0.0.1:8001:8001"   # 公開するのはライブ表示だけ（docker compose run --service-ports のとき）
+
+  # ぶれない設定（stable.env）で回す。結果は results/stable/ に出る
+  #   docker compose run --rm lab-stable python bench.py async --repeat 3
+  lab-stable:
+    extends:
+      service: lab
+    profiles: [lab]
+    depends_on: [db]
+    env_file: stable.env

@@ -210,7 +210,9 @@ class LiveServer:
                 pass  # アクセスログで観測の表示を埋めない
 
         try:
-            self.server = http.server.ThreadingHTTPServer(("127.0.0.1", port), Handler)
+            # Docker の中では公開したポートから届くように LIVE_HOST=0.0.0.0 で待ち受ける（compose.yaml）
+            host = os.environ.get("LIVE_HOST", "127.0.0.1")
+            self.server = http.server.ThreadingHTTPServer((host, port), Handler)
         except OSError as e:
             sys.exit(f"ライブ表示のポート {port} を開けない（{e.strerror}）。--live-port で変える")
         threading.Thread(target=self.server.serve_forever, daemon=True).start()
